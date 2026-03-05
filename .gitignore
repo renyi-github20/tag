@@ -1,0 +1,28 @@
+# 保留 data/ 目录结构，仅忽略其中的文件
+data/**/*
+
+# 忽略 Python 缓存与编译文件
+__pycache__/
+serve/__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境（若用 venv / .venv）
+venv/
+.venv/
+env/
+
+# 环境变量与本地配置（含 API Key 等敏感信息时不要提交）
+.env
+.env.local
+# config.local.yaml
+
+# macOS 系统文件
+.DS_Store
+
+# 若 result/ 为脚本生成、不需入库，可取消下一行注释
+# result/
+
+# IDE 配置（按需取消注释）
+# .idea/
+# .vscode/

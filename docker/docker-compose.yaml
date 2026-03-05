@@ -1,0 +1,31 @@
+# 公告抽取服务 - Docker Compose
+# 使用: 在项目根目录执行 docker compose -f docker/docker-compose.yaml up -d
+
+services:
+  extract:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: tag-extract:latest
+    container_name: tag-extract
+    ports:
+      - "8013:8013"
+    volumes:
+      # 宿主机 config 覆盖镜像内配置（按新机器修改 vl.api_url 等）
+      - ../config.yaml:/app/config.yaml:ro
+      # 可选：挂载数据与结果目录
+      - ../data:/app/data
+      - ../result:/app/result
+    restart: unless-stopped
+    # 若 VL 服务在同一 compose 中，可加 depends_on 与 network
+    # depends_on:
+    #   - vl
+    # networks:
+    #   - app
+
+# 可选：若 VL 推理服务也放同一 compose，可新增 service，例如：
+#   vl:
+#     image: your-vl-serving-image:latest
+#     ports: ["8003:8003"]
+#     deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }] } } }
+# 并在 extract 中加: depends_on: [vl], environment: 或 config 中 vl.api_url 指向 http://vl:8003/...

@@ -1,0 +1,41 @@
+requests
+fastapi
+python-multipart
+pydantic
+aiofiles
+uvicorn
+starlette
+aiohttp
+
+# Utils
+tokenizers
+tqdm
+loguru
+elasticsearch
+cryptography
+click
+filelock
+
+# DOCX
+python-docx
+
+# PPTX
+python-pptx
+
+# PDF
+pymupdf
+camelot-py
+
+# Video
+scikit-image
+av
+
+# OCR
+rapid-orientation
+rapidocr_onnxruntime
+
+# Structured data
+pandas
+openpyxl
+chardet
+sqlalchemy

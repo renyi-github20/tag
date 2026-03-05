@@ -1,0 +1,29 @@
+# vLLM 实例 1 - Qwen3-VL-32B-Instruct-FP8 (GPU 0,1)
+# 安装: sudo cp deploy/vllm-qwen-32b-fp8-1.service deploy/vllm-qwen-32b-fp8-2.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now vllm-qwen-32b-fp8-1 vllm-qwen-32b-fp8-2
+
+[Unit]
+Description=vLLM Qwen-32B-FP8 Instance 1 (GPU 0,1)
+After=network.target
+
+[Service]
+Type=simple
+User=azureuser
+Group=azureuser
+WorkingDirectory=/home/azureuser/workspace/tag
+
+Environment=CUDA_VISIBLE_DEVICES=0,1
+Environment=OMP_NUM_THREADS=1
+
+ExecStart=/anaconda/envs/qwen-vl/bin/vllm serve /home/azureuser/models/Qwen3-VL-32B-Instruct-FP8 \
+  --tensor-parallel-size 2 \
+  --port 8003 \
+  --host 0.0.0.0 \
+  --max-model-len 131072
+
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

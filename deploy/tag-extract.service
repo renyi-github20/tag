@@ -1,0 +1,20 @@
+# Systemd 单元 - 公告抽取服务
+# 安装: sudo cp deploy/tag-extract.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now tag-extract
+
+[Unit]
+Description=Tag 公告抽取服务
+After=network.target
+
+[Service]
+Type=simple
+User=azureuser
+Group=azureuser
+WorkingDirectory=/opt/tag
+Environment=PATH=/opt/tag/.venv/bin:/usr/local/bin:/usr/bin
+ExecStart=/opt/tag/.venv/bin/python main.py --host 0.0.0.0 --port 8013
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

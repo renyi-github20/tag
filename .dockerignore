@@ -1,0 +1,13 @@
+# 排除大体积与无关内容，保留 data/requirement 供镜像内使用
+data/report_new
+data/工作评估
+result/
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+.cursor
+*.md
+.env
+.env.*
