@@ -30,6 +30,7 @@ CUDA_VISIBLE_DEVICES=0,1 vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
   --limit-mm-per-prompt '{"video":0}' \
   --max-model-len 131072 \
+  --mm-processor-cache-gb 0 \
   --served-model-name "Qwen/Qwen3-VL-32B-Instruct-FP8" \
   "$@" &
 PID1=$!
@@ -42,6 +43,7 @@ CUDA_VISIBLE_DEVICES=2,3 vllm serve "$MODEL_PATH" \
   --host 0.0.0.0 \
   --limit-mm-per-prompt '{"video":0}' \
   --max-model-len 131072 \
+  --mm-processor-cache-gb 0 \
   --served-model-name "Qwen/Qwen3-VL-32B-Instruct-FP8" \
   "$@" &
 PID2=$!

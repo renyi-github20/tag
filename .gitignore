@@ -20,6 +20,9 @@ env/
 # macOS 系统文件
 .DS_Store
 
+# 忽略所有 CSV 文件
+*.csv
+
 # 若 result/ 为脚本生成、不需入库，可取消下一行注释
 # result/
 

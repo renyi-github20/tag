@@ -321,20 +321,20 @@ def _build_session(*, verify_ssl: bool = True) -> requests.Session:
 
 def _call_vl(*, vl: dict[str, Any], content: list[dict[str, Any]]) -> dict[str, Any]:
     n_images = sum(1 for x in content if x.get("type") == "image_url")
-    from scripts.vl_utils import get_vl_url
-    url = get_vl_url(vl)
-    logger.info("VL 请求: POST %s, 共 %d 条 content（其中 %d 张图）, timeout=600s", url, len(content), n_images)
+    from scripts.vl_utils import get_vl_endpoint
+    url, model, max_tokens = get_vl_endpoint(vl)
+    logger.info("VL 请求: POST %s, 共 %d 条 content（其中 %d 张图）, timeout=400s", url, len(content), n_images)
 
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if vl.get("api_key"):
         headers["Authorization"] = f"Bearer {vl['api_key']}"
 
     payload = {
-        "model": vl["model"],
+        "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.2,
         "top_p": 0.7,
-        "max_tokens": int(vl.get("max_tokens", 4096)),
+        "max_tokens": max_tokens,
         "stream": False,
     }
 
@@ -348,7 +348,7 @@ def _call_vl(*, vl: dict[str, Any], content: list[dict[str, Any]]) -> dict[str, 
         try:
             session = _build_session(verify_ssl=verify_ssl)
             resp = session.post(
-                url, headers=headers, json=payload, timeout=600
+                url, headers=headers, json=payload, timeout=400
             )
             resp.raise_for_status()
             logger.info("VL 响应: 成功, 状态码 %s", resp.status_code)

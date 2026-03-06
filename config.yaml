@@ -105,18 +105,27 @@ nextgen_pdf_parser:
   api_url: "http://127.0.0.1:8001/nextgen-pdf-parser"
   api_key: ""
 vl:
-  # 单实例用 api_url；多实例负载均衡用 api_urls（轮询 8003/8004）
+  # 单实例用 api_url；多实例负载均衡用 api_urls（轮询）
   # api_url: "http://localhost:8003/v1/chat/completions"
   api_urls:
-    - "http://localhost:8003/v1/chat/completions"
-    - "http://localhost:8004/v1/chat/completions"
+    - url: "http://120.46.71.219:8003/v1/chat/completions"
+      model: "qwen3-vl-8b"
+      max_tokens: 4096   # 8b 仅 16K context，需为输入留空间
+    - url: "http://120.46.71.219:8004/v1/chat/completions"
+      model: "qwen3-vl-8b"
+      max_tokens: 4096   # 8b 仅 16K context，需为输入留空间
+    - url: "http://localhost:8003/v1/chat/completions"
+      model: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+    - url: "http://localhost:8004/v1/chat/completions"
+      model: "Qwen/Qwen3-VL-32B-Instruct-FP8"
   # api_key: "73101174-e179-4d22-af15-aa6a7b5334b0"
-  model: "Qwen/Qwen3-VL-32B-Instruct-FP8"
+  model: "Qwen/Qwen3-VL-32B-Instruct-FP8"   # 默认 model（当 api_urls 项未指定 model 时使用）
   context_length: 131072
   max_tokens: 16384
   max_frames: 100
   enable: true
-  parallel_workers: 2
+  parallel_workers: 4   # 与 api_urls 实例数一致（4 个接口）
+  max_pages: 40        # 所有模型只抽取前 40 页
   jpeg_quality: 78
   dpi: 150
   # api_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"

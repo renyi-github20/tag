@@ -11,6 +11,7 @@
     python scripts/extract_batch_by_month.py --months 2025-08   # 仅 2025-08
     python scripts/extract_batch_by_month.py --types esg_report  # 仅 ESG 报告
     python scripts/extract_batch_by_month.py --limit 5           # 每类最多 5 个文件（测试用）
+    python scripts/extract_batch_by_month.py --max-total 9000    # 总共最多处理 9000 个文件（默认）
     python scripts/extract_batch_by_month.py --workers 2         # 2 个 PDF 并行抽取（默认取 config vl.parallel_workers）
 """
 
@@ -118,11 +119,13 @@ def run_extract_batch(
     output_jsonl: Path,
     *,
     limit: int = 0,
+    max_per_type: int = 0,
+    max_files: int = 0,
     skip: int = 0,
     resume: bool = True,
     workers: int = 0,
-) -> int:
-    """调用 serve 的批量抽取逻辑，返回成功数。workers>1 时并行处理多个 PDF。"""
+) -> tuple[int, int]:
+    """调用 serve 的批量抽取逻辑，返回 (成功数, 本批处理文件数)。workers>1 时并行处理多个 PDF。"""
     from serve.app import (
         _get_config,
         _get_extractor,
@@ -137,15 +140,20 @@ def run_extract_batch(
     files = list(_iter_input_files(input_path, type_key))
     if skip > 0:
         files = files[skip:]
-    if limit > 0:
-        files = files[:limit]
+    # limit>0 优先；否则 max_per_type>0 时作为上限；max_files>0 为全局配额，取更小值
+    effective_limit = limit if limit > 0 else (max_per_type if max_per_type > 0 else 0)
+    if max_files > 0:
+        effective_limit = min(effective_limit, max_files) if effective_limit > 0 else max_files
+    if effective_limit > 0:
+        files = files[:effective_limit]
 
     if resume and output_jsonl.exists():
         done = _load_done_filenames(output_jsonl)
         files = [p for p in files if p.name not in done]
 
+    num_to_process = len(files)
     if not files:
-        return 0
+        return 0, 0
 
     extract_fn, returns_list = _get_extractor(type_key)
     req_path = Path(config.get("_requirement_path", _PROJECT_ROOT / "data" / "requirement" / "requirement_1.json"))
@@ -219,7 +227,7 @@ def run_extract_batch(
                             success += 1
                         out.flush()
 
-    return success
+    return success, num_to_process
 
 
 def main() -> int:
@@ -227,6 +235,7 @@ def main() -> int:
     parser.add_argument("--months", nargs="+", default=None, help="月份列表，如 2025-06 2025-07，默认全部")
     parser.add_argument("--types", nargs="+", default=None, help="类型列表，如 esg_report governance，默认全部")
     parser.add_argument("--limit", type=int, default=0, help="每类最多处理数量，0=不限制")
+    parser.add_argument("--max-total", type=int, default=9000, help="总共最多处理文件数，0=不限制，默认 9000")
     parser.add_argument("--skip", type=int, default=0, help="每类跳过前 N 个")
     parser.add_argument("--no-resume", action="store_true", help="不使用断点续跑")
     parser.add_argument("--no-csv", action="store_true", help="不生成 CSV")
@@ -247,17 +256,25 @@ def main() -> int:
             return 1
 
     total_success = 0
+    total_processed = 0
+    max_total = args.max_total
     for month in months:
+        if max_total > 0 and total_processed >= max_total:
+            break
         month_data = DATA_ROOT / month
         if not month_data.exists():
             print(f"跳过（不存在）: {month_data}")
             continue
         for type_key in types:
+            if max_total > 0 and total_processed >= max_total:
+                break
             folder = TYPE_TO_FOLDER[type_key]
             input_path = month_data / folder
             if not input_path.exists():
                 print(f"跳过（不存在）: {input_path}")
                 continue
+
+            remaining = max_total - total_processed if max_total > 0 else 0
 
             output_dir = RESULT_ROOT / month / folder
             output_jsonl = output_dir / f"result_{type_key}.jsonl"
@@ -265,16 +282,19 @@ def main() -> int:
 
             print(f"\n>>> {month} / {folder}")
             try:
-                n = run_extract_batch(
+                n, num_processed = run_extract_batch(
                     input_path,
                     type_key,
                     output_jsonl,
                     limit=args.limit,
+                    max_per_type=0,
+                    max_files=remaining if max_total > 0 else 0,
                     skip=args.skip,
                     resume=not args.no_resume,
                     workers=args.workers,
                 )
                 total_success += n
+                total_processed += num_processed
                 print(f"    抽取完成: {n} 条 -> {output_jsonl}")
 
                 if not args.no_csv and output_jsonl.exists():
@@ -284,7 +304,10 @@ def main() -> int:
                 print(f"    错误: {e}")
                 raise
 
-    print(f"\n总计成功: {total_success} 条")
+    msg = f"\n总计成功: {total_success} 条"
+    if max_total > 0:
+        msg += f"，处理文件数: {total_processed}/{max_total}"
+    print(msg)
     return 0
 
 

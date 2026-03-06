@@ -16,10 +16,18 @@ import base64
 import json
 import logging
 import re
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import fitz  # PyMuPDF
+
+# 保证多线程下 from scripts.xxx 可导入（无论当前工作目录）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +37,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import requests
 import yaml
+
+
+def _default_input_dir() -> str:
+    """默认 kg_data/data：该目录下所有子文件夹里的「定期报告」中的 PDF 都会被扫描。"""
+    for p in [
+        Path("/home/azureuser/workspace/data/kg_data/data"),
+        Path("/workspace/data/kg_data/data"),
+        _PROJECT_ROOT.parent / "data" / "kg_data" / "data",
+        _PROJECT_ROOT / "data" / "kg_data" / "data",
+    ]:
+        if p.exists():
+            return str(p)
+    return "data/kg_data/data"
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
@@ -216,6 +237,24 @@ def _strip_code_fences(s: str) -> str:
     return s
 
 
+def _merge_extracted(ext1: dict[str, Any], ext2: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    """合并两批抽取结果：优先取非「未找到」的值。"""
+    merged: dict[str, Any] = {}
+    for f in fields:
+        v1 = ext1.get(f)
+        v2 = ext2.get(f)
+        if v1 not in (None, "", "未找到", []):
+            merged[f] = v1
+        elif v2 not in (None, "", "未找到", []):
+            merged[f] = v2
+        else:
+            merged[f] = "未找到"
+    for k, v in {**ext1, **ext2}.items():
+        if k not in merged and v not in (None, "", "未找到"):
+            merged[k] = v
+    return merged
+
+
 def _loads_json_relaxed(s: str) -> dict[str, Any]:
     """
     尽量把模型输出解析成 JSON 对象。
@@ -343,26 +382,34 @@ def build_recheck_prompt(fields: list[str], current: dict[str, Any], missing: li
     )
 
 
-def _call_vl(*, vl: dict[str, Any], content: list[dict[str, Any]]) -> dict[str, Any]:
+def _call_vl(*, vl: dict[str, Any], content: list[dict[str, Any]], num_pages: int | None = None, endpoint: tuple[str, str, int] | None = None) -> dict[str, Any]:
+    """用 api_urls 项内的 url 和 model（若该项有 model），否则用 vl 顶层配置。"""
     n_images = sum(1 for x in content if x.get("type") == "image_url")
-    from scripts.vl_utils import get_vl_url
-    url = get_vl_url(vl)
-    logger.info("VL 请求: POST %s, 共 %d 条 content（其中 %d 张图）, timeout=600s", url, len(content), n_images)
+    from scripts.vl_utils import get_vl_endpoint
+    if endpoint:
+        url, model, max_tokens = endpoint
+    else:
+        url, model, max_tokens = get_vl_endpoint(vl, num_pages=num_pages)
+    logger.info("VL 请求: POST %s, model=%s, 共 %d 条 content（其中 %d 张图）, timeout=400s", url, model, len(content), n_images)
 
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if vl.get("api_key"):
         headers["Authorization"] = f"Bearer {vl['api_key']}"
 
     payload = {
-        "model": vl["model"],
+        "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.2,
         "top_p": 0.7,
-        "max_tokens": int(vl.get("max_tokens", 4096)),
+        "max_tokens": max_tokens,
         "stream": False,
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=600)
+    resp = requests.post(url, headers=headers, json=payload, timeout=400)
+    if not resp.ok:
+        err_preview = (resp.text or "")[:800]
+        logger.error("VL 请求失败: %s %s", resp.status_code, resp.reason)
+        logger.error("响应内容: %s", err_preview)
     resp.raise_for_status()
     logger.info("VL 响应: 成功, 状态码 %s", resp.status_code)
     return resp.json()
@@ -571,20 +618,41 @@ def call_vl_extract(
     logger.info("[%s] PDF 已转成 %d 页图片（总页数 %d）", pdf_path.name, len(images), total_pages)
     prompt = build_prompt(fields, comments)
 
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for img in images:
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{img['base64']}"},
-            }
-        )
+    from scripts.vl_utils import get_vl_endpoint, PAGE_THRESHOLD_8B_BATCH
 
-    logger.info("[%s] 正在调用 VL...", pdf_path.name)
-    data = _call_vl(vl=vl, content=content)
-    raw = data["choices"][0]["message"]["content"]
-    extracted = _loads_json_relaxed(raw)
-    logger.info("[%s] VL 返回成功，已解析 JSON", pdf_path.name)
+    endpoint = get_vl_endpoint(vl, num_pages=len(images))
+    url, model, max_tokens = endpoint
+    n_imgs = len(images)
+
+    if model == "qwen3-vl-8b" and n_imgs > PAGE_THRESHOLD_8B_BATCH:
+        # 8b 每批最多 20 页，多批合并
+        batch_size = PAGE_THRESHOLD_8B_BATCH
+        all_extracted: list[dict[str, Any]] = []
+        for i in range(0, n_imgs, batch_size):
+            batch_imgs = images[i : i + batch_size]
+            content_batch: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for img in batch_imgs:
+                content_batch.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img['base64']}"}})
+            batch_num = len(all_extracted) + 1
+            logger.info("[%s] 8b 第 %d 批: %d 页", pdf_path.name, batch_num, len(batch_imgs))
+            data = _call_vl(vl=vl, content=content_batch, endpoint=endpoint)
+            ext = _loads_json_relaxed(data["choices"][0]["message"]["content"])
+            all_extracted.append(ext)
+        extracted = all_extracted[0]
+        for ext in all_extracted[1:]:
+            extracted = _merge_extracted(extracted, ext, fields)
+        logger.info("[%s] VL %d 批合并完成", pdf_path.name, len(all_extracted))
+    else:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img['base64']}"}}
+            )
+        logger.info("[%s] 正在调用 VL...", pdf_path.name)
+        data = _call_vl(vl=vl, content=content, endpoint=endpoint)
+        raw = data["choices"][0]["message"]["content"]
+        extracted = _loads_json_relaxed(raw)
+        logger.info("[%s] VL 返回成功，已解析 JSON", pdf_path.name)
 
     # 语义匹配后处理：尝试从类似字段名或等价关系补全
     extracted = _semantic_field_fallback(extracted, fields)
@@ -665,14 +733,30 @@ def call_vl_extract(
     return record
 
 
-def iter_pdfs(input_path: Path) -> Iterable[Path]:
+def _extract_date_from_path(p: Path) -> tuple[int, int]:
+    """
+    从路径中提取 YYYY-MM 格式的日期，用于按时间倒序排序。
+    返回 (year, month)，若未找到则返回 (0, 0)。
+    """
+    match = re.search(r"(\d{4})-(\d{2})", str(p))
+    if match:
+        return (int(match.group(1)), int(match.group(2)))
+    return (0, 0)
+
+
+def iter_pdfs(input_path: Path, *, reverse_date: bool = False) -> Iterable[Path]:
     if input_path.is_file():
         if input_path.suffix.lower() == ".pdf":
             yield input_path
         return
-    for p in sorted(input_path.glob("**/*")):
-        if p.is_file() and p.suffix.lower() == ".pdf":
-            yield p
+    pdfs = [p for p in input_path.glob("**/*") if p.is_file() and p.suffix.lower() == ".pdf"]
+    if reverse_date:
+        pdfs.sort(key=lambda p: str(p))  # 同月内按路径升序
+        pdfs.sort(key=lambda p: _extract_date_from_path(p), reverse=True)  # 时间倒序
+    else:
+        pdfs.sort()
+    for p in pdfs:
+        yield p
 
 
 def load_done_filenames(output_path: Path) -> set[str]:
@@ -701,7 +785,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="定期报告字段抽取（VL大模型）")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径（需要包含 vl 配置）")
     parser.add_argument("--requirement", default="data/requirement/requirement_1.json", help="requirement_1.json 路径")
-    parser.add_argument("--input", default="data/report/定期报告", help="定期报告PDF目录（或单个PDF）")
+    parser.add_argument("--input", default=None, help="定期报告 PDF 目录（默认 kg_data/data，其下为 YYYY-MM/定期报告/）")
     parser.add_argument("--output", default="result/periodic_reports_extracted_vl.jsonl", help="输出 jsonl 路径")
     parser.add_argument("--limit", type=int, default=5, help="最多处理多少份PDF（0=不限制；默认5用于生成样例）")
     parser.add_argument("--skip", type=int, default=0, help="跳过前 N 份 PDF，与 --limit 配合可只处理中间或最后若干份")
@@ -714,20 +798,46 @@ def main() -> int:
         help="断点续跑：读取 output 中已有 filename，只处理未完成的 PDF，并追加写入",
     )
     parser.add_argument("--print-sample", action="store_true", help="打印第一条结果到stdout")
+    parser.add_argument(
+        "--reverse-date",
+        action="store_true",
+        help="按时间倒序处理（从路径中解析 YYYY-MM，新的月份优先）",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="并行处理的 PDF 数（0=用 config 中 vl.parallel_workers，1=串行）",
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="只处理该年份（从路径 YYYY-MM 解析，如 2025 表示只处理 25 年）",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
     requirement_path = Path(args.requirement)
-    input_path = Path(args.input)
+    input_path = Path(args.input if args.input else _default_input_dir())
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info("开始抽取定期报告")
+    if not input_path.exists():
+        logger.error("输入目录不存在: %s", input_path)
+        return 1
     config = load_config(config_path)
     fields, comments = load_fields_and_comments(requirement_path)
     logger.info("已加载 config 与 requirement，共 %d 个字段", len(fields))
+    logger.info("输入目录: %s", input_path)
 
-    pdfs = list(iter_pdfs(input_path))
+    pdfs = list(iter_pdfs(input_path, reverse_date=args.reverse_date))
+    if args.year is not None:
+        pdfs = [p for p in pdfs if _extract_date_from_path(p)[0] == args.year]
+        logger.info("只处理 %d 年: 共 %d 份 PDF", args.year, len(pdfs))
+    if args.reverse_date:
+        logger.info("已按时间倒序排列（新月份优先）")
     if args.skip > 0:
         pdfs = pdfs[args.skip:]
         logger.info("已跳过前 %d 份，剩余 %d 份", args.skip, len(pdfs))
@@ -742,30 +852,63 @@ def main() -> int:
     else:
         logger.info("待处理 PDF: %d 个", len(pdfs))
 
+    workers = args.workers
+    if workers <= 0:
+        workers = config.get("vl", {}).get("parallel_workers", 1)
+    workers = max(1, workers)
+    if workers > 1:
+        logger.info("并行数: %d 个 PDF 同时处理", workers)
+
     # 打开输出文件（追加或覆盖模式）
     mode = "a" if (args.append or args.resume) else "w"
     output_file = output_path.open(mode, encoding="utf-8")
+    file_lock = threading.Lock()
     total = len(pdfs)
     success_count = 0
 
+    def process_one(p: Path):
+        try:
+            rec = call_vl_extract(
+                pdf_path=p,
+                fields=fields,
+                comments=comments,
+                config=config,
+                dpi=args.dpi,
+                max_pages=args.max_pages,
+            )
+            return (p, rec, None)
+        except Exception as e:
+            return (p, None, e)
+
     try:
-        for i, p in enumerate(pdfs, 1):
-            logger.info("===== 第 %d/%d 个: %s =====", i, total, p.name)
-            try:
-                rec = call_vl_extract(
-                    pdf_path=p,
-                    fields=fields,
-                    comments=comments,
-                    config=config,
-                    dpi=args.dpi,
-                    max_pages=args.max_pages,
-                )
-                output_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                output_file.flush()
-                success_count += 1
-                logger.info("[%s] 已写入 %s", p.name, output_path)
-            except Exception as e:
-                logger.exception("[%s] 本份抽取失败，跳过，继续下一份: %s", p.name, e)
+        if workers <= 1:
+            for i, p in enumerate(pdfs, 1):
+                logger.info("===== 第 %d/%d 个: %s =====", i, total, p.name)
+                _, rec, err = process_one(p)
+                if err:
+                    logger.exception("[%s] 本份抽取失败，跳过: %s", p.name, err)
+                else:
+                    output_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    output_file.flush()
+                    success_count += 1
+                    logger.info("[%s] 已写入 %s", p.name, output_path)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                fut = {ex.submit(process_one, p): p for p in pdfs}
+                for i, f in enumerate(as_completed(fut), 1):
+                    p = fut[f]
+                    try:
+                        _, rec, err = f.result()
+                        if err:
+                            logger.exception("[%s] 本份抽取失败，跳过: %s", p.name, err)
+                        else:
+                            with file_lock:
+                                output_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                output_file.flush()
+                            success_count += 1
+                            logger.info("[%d/%d] [%s] 已写入 %s", i, total, p.name, output_path)
+                    except Exception as e:
+                        logger.exception("[%s] 本份失败: %s", p.name, e)
     finally:
         output_file.close()
 

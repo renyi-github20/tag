@@ -16,6 +16,8 @@ import base64
 import json
 import logging
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -170,27 +172,27 @@ def build_prompt(fields: list[str], comments: dict[str, str]) -> str:
 
 def _call_vl(*, vl: dict[str, Any], content: list[dict[str, Any]]) -> dict[str, Any]:
     n_images = sum(1 for x in content if x.get("type") == "image_url")
-    from scripts.vl_utils import get_vl_url
-    url = get_vl_url(vl)
-    logger.info("VL 请求: POST %s, 共 %d 条 content（其中 %d 张图）, timeout=600s", url, len(content), n_images)
+    from scripts.vl_utils import get_vl_endpoint
+    url, model, max_tokens = get_vl_endpoint(vl)
+    logger.info("VL 请求: POST %s, 共 %d 条 content（其中 %d 张图）, timeout=400s", url, len(content), n_images)
 
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if vl.get("api_key"):
         headers["Authorization"] = f"Bearer {vl['api_key']}"
 
     payload = {
-        "model": vl["model"],
+        "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.2,
         "top_p": 0.7,
-        "max_tokens": int(vl.get("max_tokens", 4096)),
+        "max_tokens": max_tokens,
         "stream": False,
     }
 
     verify_ssl = vl.get("verify_ssl", True)
     if not verify_ssl:
         logger.warning("VL 请求已关闭 SSL 证书校验（verify_ssl=false），仅建议在受信环境使用")
-    resp = requests.post(url, headers=headers, json=payload, timeout=600, verify=verify_ssl)
+    resp = requests.post(url, headers=headers, json=payload, timeout=400, verify=verify_ssl)
     try:
         data = resp.json()
     except requests.exceptions.JSONDecodeError as e:
@@ -557,6 +559,12 @@ def main() -> int:
         default="",
         help="可选：filename -> 三级分类 映射文件（JSON 或 JSONL），用于覆盖「制度分类」。无三级分类时可省略",
     )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=0,
+        help="并行处理的 PDF 数（0=用 config 中 vl.parallel_workers，1=串行）",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -606,58 +614,77 @@ def main() -> int:
     else:
         logger.info("待处理 PDF: %d 个", len(pdfs))
 
+    parallel_workers = args.parallel_workers
+    if parallel_workers <= 0:
+        parallel_workers = config.get("vl", {}).get("parallel_workers", 1)
+    parallel_workers = max(1, parallel_workers)
+    if parallel_workers > 1:
+        logger.info("并行数: %d 个 PDF 同时处理", parallel_workers)
+
+    def process_one(p: Path) -> tuple[Path, dict[str, Any] | None, BaseException | None]:
+        try:
+            rec = call_vl_extract(
+                pdf_path=p,
+                fields=fields,
+                comments=comments,
+                config=config,
+                dpi=args.dpi,
+                max_pages=args.max_pages,
+            )
+            if sibling_index and "关联公告名称" in rec and (rec.get("关联公告名称") in (None, "", "未找到")):
+                related_fname, inferred_decision = find_related_announcement_from_dir(rec, sibling_index)
+                if related_fname:
+                    rec["关联公告名称"] = related_fname
+                    if inferred_decision and rec.get("决策机构") in (None, "", "未找到"):
+                        rec["决策机构"] = inferred_decision
+                    logger.info("[%s] 从同目录匹配到决议公告: %s", p.name, related_fname[:60])
+            if announcements_list and "关联公告名称" in rec and (rec.get("关联公告名称") in (None, "", "未找到")):
+                related_title, related_ann = find_related_announcement(
+                    rec,
+                    announcements_list,
+                    institution_name=str(rec.get("制度名称") or ""),
+                )
+                if related_title:
+                    rec["关联公告名称"] = related_title
+                    ann_decision = (related_ann or {}).get("决策机构") or (related_ann or {}).get("decision_maker")
+                    if ann_decision and ann_decision in ("股东会", "董事会", "监事会"):
+                        rec["决策机构"] = ann_decision
+            if classification_map and rec.get("filename") in classification_map:
+                rec["制度分类"] = classification_map[rec["filename"]]
+            return p, rec, None
+        except Exception as e:
+            logger.exception("[%s] 本份抽取失败: %s", p.name, e)
+            return p, None, e
+
     mode = "a" if (args.append or args.resume) else "w"
     output_file = output_path.open(mode, encoding="utf-8")
+    write_lock = threading.Lock()
     total = len(pdfs)
     success_count = 0
 
     try:
-        for i, p in enumerate(pdfs, 1):
-            logger.info("===== 第 %d/%d 个: %s =====", i, total, p.name)
-            try:
-                rec = call_vl_extract(
-                    pdf_path=p,
-                    fields=fields,
-                    comments=comments,
-                    config=config,
-                    dpi=args.dpi,
-                    max_pages=args.max_pages,
-                )
-                # 从同目录下同公司、同日期的文件名匹配「关联公告名称」（仅决议公告，不关联制度文档）
-                if sibling_index and "关联公告名称" in rec and (rec.get("关联公告名称") in (None, "", "未找到")):
-                    related_fname, inferred_decision = find_related_announcement_from_dir(rec, sibling_index)
-                    if related_fname:
-                        rec["关联公告名称"] = related_fname
-                        if inferred_decision and rec.get("决策机构") in (None, "", "未找到"):
-                            rec["决策机构"] = inferred_decision
-                            logger.info("[%s] 从决议公告文件名推断决策机构: %s", p.name, inferred_decision)
-                        logger.info("[%s] 从同目录匹配到决议公告: %s", p.name, related_fname[:60])
-                # 可选：若仍未找到，从外部公告库 JSONL 匹配
-                if announcements_list and "关联公告名称" in rec and (rec.get("关联公告名称") in (None, "", "未找到")):
-                    related_title, related_ann = find_related_announcement(
-                        rec,
-                        announcements_list,
-                        institution_name=str(rec.get("制度名称") or ""),
-                    )
-                    if related_title:
-                        rec["关联公告名称"] = related_title
-                        # 依据关联公告数据对应决策机构（反馈要求）
-                        ann_decision = (related_ann or {}).get("决策机构") or (related_ann or {}).get("decision_maker")
-                        if ann_decision and ann_decision in ("股东会", "董事会", "监事会"):
-                            rec["决策机构"] = ann_decision
-                            logger.info("[%s] 从公告库匹配到关联公告，并采纳决策机构: %s", p.name, ann_decision)
-                        else:
-                            logger.info("[%s] 从公告库匹配到关联公告: %s", p.name, related_title[:50])
-                # 可选：用外部映射覆盖「制度分类」（无三级分类时可省略）
-                if classification_map and rec.get("filename") in classification_map:
-                    rec["制度分类"] = classification_map[rec["filename"]]
-                    logger.info("[%s] 已用映射覆盖制度分类: %s", p.name, rec["制度分类"])
+        if parallel_workers <= 1:
+            for i, p in enumerate(pdfs, 1):
+                logger.info("===== 第 %d/%d 个: %s =====", i, total, p.name)
+                _, rec, err = process_one(p)
+                if err or rec is None:
+                    continue
                 output_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 output_file.flush()
                 success_count += 1
                 logger.info("[%s] 已写入 %s", p.name, output_path)
-            except Exception as e:
-                logger.exception("[%s] 本份抽取失败，跳过，继续下一份: %s", p.name, e)
+        else:
+            with ThreadPoolExecutor(max_workers=parallel_workers) as ex:
+                futures = {ex.submit(process_one, p): p for p in pdfs}
+                for future in as_completed(futures):
+                    p, rec, err = future.result()
+                    if err or rec is None:
+                        continue
+                    with write_lock:
+                        output_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                        output_file.flush()
+                        success_count += 1
+                    logger.info("[%s] 已写入 %s (%d/%d)", p.name, output_path, success_count, total)
     finally:
         output_file.close()
 
