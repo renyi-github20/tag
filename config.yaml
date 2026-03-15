@@ -4,70 +4,15 @@ log_path: /app/log/app.log
 allow_cors: false
 swagger_enable: false
 
-database:
-  url: "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/chat"
-document_store:
-  elasticsearch:
-    hosts:
-      - "http://127.0.0.1:9200"
-    index: courses_20250820
-  internet_sources:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: internet_sources_20250829
-  news:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: news_realtime_v3
-  background_improvement_sources:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: background_improvement_2025
-  summer_programs_sources:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: summer_programs_2025
-  faq_sources:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: faqs_realtime
-  personal_kb:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: personal_kb_dev_v1
-  riki_sources:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: "riki_sources_2025"
-  schools:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: "schools_20251125"
-  tutors:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: "tutors_v1"
-  projects:
-    elasticsearch:
-      hosts:
-        - "http://127.0.0.1:9200"
-      index: "projects_v1"
-embedder:
-  api_url: "http://127.0.0.1:8001/embeddings"
-  api_key: ""
+paths:
+  data_root: ""          # 批量抽取数据源，留空则默认 <项目>/data/report_new
+  result_root: ""        # 抽取结果输出，留空则默认 <项目>/result
+  kg_data_root: ""       # kg_data 定期报告数据源，留空则默认 <项目>/../data/kg_data/data
+
 llm:
   default:
     api_base: "https://ark.cn-beijing.volces.com/api/v3/responses"
-    api_key: "e9b08708-c869-4af9-b43a-ee3d3fee1420"
+    api_key: ""
     model: "doubao-seed-1-6-251015"
     # model: "doubao-seed-1-8-251228"
     context_length: 16384
@@ -82,28 +27,6 @@ llm:
     api_key: ""
     model: "qwen2-vl-72b"
     context_length: 16384
-  rating:
-    api_base: "http://172.17.124.37:19118/v1"
-    api_key: ""
-    model: "qwen3-32b"
-    context_length: 16384
-  sql:
-    api_base: "http://172.17.124.37:19118/v1"
-    api_key: ""
-    model: "qwen3-32b"
-    context_length: 16384
-
-asr:
-  api_url: "http://127.0.0.1:8080/v1/audio/transcriptions"
-  api_key: ""
-  model: "Systran/faster-whisper-large-v3"
-ocr:
-  api_url: "http://127.0.0.1:8001/ocr"
-  api_key: ""
-  enable: false
-nextgen_pdf_parser:
-  api_url: "http://127.0.0.1:8001/nextgen-pdf-parser"
-  api_key: ""
 vl:
   # 单实例用 api_url；多实例负载均衡用 api_urls（轮询）
   # api_url: "http://localhost:8003/v1/chat/completions"
@@ -118,7 +41,6 @@ vl:
       model: "Qwen/Qwen3-VL-32B-Instruct-FP8"
     - url: "http://localhost:8004/v1/chat/completions"
       model: "Qwen/Qwen3-VL-32B-Instruct-FP8"
-  # api_key: "73101174-e179-4d22-af15-aa6a7b5334b0"
   model: "Qwen/Qwen3-VL-32B-Instruct-FP8"   # 默认 model（当 api_urls 项未指定 model 时使用）
   context_length: 131072
   max_tokens: 16384
@@ -128,31 +50,13 @@ vl:
   max_pages: 40        # 所有模型只抽取前 40 页
   jpeg_quality: 78
   dpi: 150
-  # api_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-  # api_key: "73101174-e179-4d22-af15-aa6a7b5334b0"
-  # model: "doubao-1.5-vision-pro-250328"
-  # context_length: 131072
-  # max_tokens: 16384
-  # max_frames: 100
-  # enable: true
 
   # api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-  # api_key: "sk-e65b396f16eb40b19fadc8f4b136ce7a"
+  # api_key: ""
   # model: "qwen3-vl-plus" 
   # context_length: 131072
   # max_tokens: 16384
   # max_frames: 100
   # enable: true
-summary:
-  api_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-  api_key: ""
-  model: "doubao-seed-1-8-251228"
-  context_length: 131072
-  max_tokens: 16384
-asr-streaming:
-  api_url: "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
-  app_key: "xxx"
-  access_key: "xxx"
-  secret_key: "xxx"
 
 
